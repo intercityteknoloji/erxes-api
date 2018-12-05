@@ -1,5 +1,6 @@
 import * as graph from 'fbgraph';
 import { Accounts } from '../db/models';
+import { IFbUser } from '../db/models/definitions/conversationMessages';
 import { receiveWebhookResponse } from './facebook';
 
 /*
@@ -15,6 +16,7 @@ export const graphRequest = {
     return new Promise((resolve, reject) => {
       graph[method](path, ...otherParams, (error, response) => {
         if (error) {
+          console.log('error', error);
           return reject(error);
         }
 
@@ -64,14 +66,14 @@ export const trackIntegrations = expressApp => {
 
 export const trackFbLogin = expressApp => {
   expressApp.get('/fblogin', (req, res) => {
-    const { FACEBOOK_APP_ID, FACEBOOK_APP_SECRET, DOMAIN, MAIN_APP_DOMAIN } = process.env;
+    const { FACEBOOK_APP_ID, FACEBOOK_APP_SECRET, MAIN_APP_DOMAIN } = process.env;
 
     const conf = {
       client_id: FACEBOOK_APP_ID,
       client_secret: FACEBOOK_APP_SECRET,
       scope:
-        'manage_pages, pages_show_list, pages_messaging, publish_pages, pages_messaging_phone_number, pages_messaging_subscriptions',
-      redirect_uri: `${DOMAIN}/fblogin`,
+        'manage_pages, pages_show_list, pages_messaging, pages_messaging_phone_number, pages_messaging_subscriptions',
+      redirect_uri: `https://271ebdec.ngrok.io/fblogin`,
     };
 
     // we don't have a code yet
@@ -126,16 +128,39 @@ export const trackFbLogin = expressApp => {
   });
 };
 
-interface IComment {
+export interface IComment {
   id: string;
   parent?: { id: string };
-  from: { name: string; id: string };
-  message: string;
-  attachment_url: string;
+  from: IFbUser;
+  message?: string;
+  attachment_url?: string;
+  attachment?: any;
+  can_comment: boolean;
+  comment_count: number;
+  created_time: string;
+  comments: IComments;
 }
 
-interface IComments {
+export interface IComments {
   data: IComment[];
+  paging: any;
+  summary?: {
+    order: string;
+    total_count: string;
+    can_comment: boolean;
+  };
+}
+
+export interface IPost {
+  caption?: string;
+  id: string;
+  description?: string;
+  link?: string;
+  picture?: string;
+  source?: string;
+  message?: string;
+  from: IFbUser;
+  comments?: IComments;
 }
 
 /*
@@ -169,4 +194,26 @@ export const subscribePage = async (pageId, pageToken): Promise<{ success: true 
   return graphRequest.post(`${pageId}/subscribed_apps`, pageToken, {
     subscribed_fields: ['conversations', 'messages', 'feed'],
   });
+};
+
+export const getCommentInfo = async ({ commentId, token }: { commentId: string; token: string }): Promise<IComment> => {
+  return graphRequest.get(
+    `/${commentId}?fields=parent.fields(id),from,message,can_comment,attachment,comment_count,created_time,comments.summary(true)`,
+    token,
+  );
+};
+
+export const getPostInfo = async ({ postId, token }: { postId: string; token: string }): Promise<IPost> => {
+  return graphRequest.get(
+    `/${postId}?fields=id,caption,description,link,picture,source,message,from,comments.summary(true)`,
+    token,
+  );
+};
+
+export const getComments = async ({ commentId, token }: { commentId: string; token: string }): Promise<IComments> => {
+  return graphRequest.get(`/${commentId}/comments?fields=parent.fields(id),from,message&limit=1000`, token);
+};
+
+export const fetchComments = async ({ postId, token, limit }: { postId: string; token: string; limit: number }) => {
+  return graphRequest.get(`/${postId}/comments?order=reverse_chronological&limit=${limit || 5}`, token);
 };
