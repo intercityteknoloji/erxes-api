@@ -73,7 +73,7 @@ export const trackFbLogin = expressApp => {
       client_secret: FACEBOOK_APP_SECRET,
       scope:
         'manage_pages, pages_show_list, pages_messaging, pages_messaging_phone_number, pages_messaging_subscriptions',
-      redirect_uri: `https://271ebdec.ngrok.io/fblogin`,
+      redirect_uri: `https://43762707.ngrok.io/fblogin`,
     };
 
     // we don't have a code yet
@@ -108,10 +108,11 @@ export const trackFbLogin = expressApp => {
       async (_err, facebookRes) => {
         const { access_token } = facebookRes;
 
-        const userAccount: { id: string; first_name: string; last_name: string } = await graphRequest.get(
-          'me?fields=id,first_name,last_name',
-          access_token,
-        );
+        const userAccount: {
+          id: string;
+          first_name: string;
+          last_name: string;
+        } = await graphRequest.get('me?fields=id,first_name,last_name', access_token);
 
         const name = `${userAccount.first_name} ${userAccount.last_name}`;
 
@@ -144,9 +145,9 @@ export interface IComment {
 export interface IComments {
   data: IComment[];
   paging: any;
-  summary?: {
+  summary: {
     order: string;
-    total_count: string;
+    total_count: number;
     can_comment: boolean;
   };
 }

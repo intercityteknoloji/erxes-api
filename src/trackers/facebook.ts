@@ -24,6 +24,7 @@ interface IPostParams {
   photos?: string[];
   caption?: string;
   description?: string;
+  created_time?: string;
   picture?: string;
   source?: string;
   message?: string;
@@ -78,18 +79,6 @@ interface IGetOrCreateConversationParams {
   attachments?: any;
   msgFacebookData: IMsgFacebook;
 }
-
-/*
- * Get list of pages that authorized user owns
- */
-export const getPageList = async (accessToken?: string) => {
-  const response: any = await graphRequest.get('/me/accounts?limit=100', accessToken);
-
-  return response.data.map(page => ({
-    id: page.id,
-    name: page.name,
-  }));
-};
 
 /*
  * Save webhook response
@@ -163,224 +152,6 @@ export class SaveWebhookResponse {
       // someone posted on our wall
       await this.getOrCreateConversationByFeed(event.value);
     }
-  }
-
-  /*
-   * Get page access token
-   */
-  public getPageAccessToken() {
-    // get page access token
-    return graphRequest.get(`${this.currentPageId}/?fields=access_token`, this.userAccessToken);
-  }
-
-  /**
-   * Receives feed updates
-   */
-  public handlePosts(postParams: IPostParams) {
-    const { post_id, video_id, link, photo_id, item, photos } = postParams;
-
-    const doc: IMsgFacebook = {
-      postId: post_id,
-      item,
-      isPost: true,
-    };
-
-    if (link) {
-      // Posted video
-      if (video_id) {
-        doc.video = link;
-
-        // Posted photo
-      } else if (photo_id) {
-        doc.photo = link;
-      } else {
-        doc.link = link;
-      }
-    }
-
-    // Posted multiple image
-    if (photos) {
-      doc.photos = photos;
-    }
-
-    return doc;
-  }
-
-  /**
-   * Receives comment
-   */
-  public async handleComments(commentParams: ICommentParams) {
-    const { photo, video, post_id, parent_id, item, comment_id, verb, id } = commentParams;
-
-    const doc: IMsgFacebook = {
-      postId: post_id,
-      item,
-      commentId: id ? id : comment_id,
-    };
-
-    if (post_id !== parent_id) {
-      doc.parentId = parent_id;
-    }
-
-    if (photo) {
-      doc.photo = photo;
-    }
-
-    if (video) {
-      doc.video = video;
-    }
-
-    if (verb && post_id) {
-      // Counting post comments only
-      await this.updateCommentCount(verb, post_id);
-    }
-
-    return doc;
-  }
-
-  /**
-   * Increase or decrease comment count
-   */
-  public async updateCommentCount(type: string, postId: string) {
-    let count = -1;
-
-    if (type === 'add') {
-      count = 1;
-    }
-
-    return ConversationMessages.updateOne(
-      { 'facebookData.postId': postId },
-      { $inc: { 'facebookData.commentCount': count } },
-    );
-  }
-
-  /**
-   * Increase or decrease like count
-   */
-  public async updateLikeCount(type: string, selector: any) {
-    let count = -1;
-
-    if (type === 'add') {
-      count = 1;
-    }
-
-    return ConversationMessages.updateMany(selector, {
-      $inc: { 'facebookData.likeCount': count },
-    });
-  }
-
-  /**
-   * Updates reaction
-   */
-  public async updateReactions(type: string, selector: any, reactionType: string, from: IFbUser) {
-    const reactionField = `facebookData.reactions.${reactionType}`;
-
-    if (type === 'add') {
-      return ConversationMessages.updateMany(selector, {
-        $push: { [reactionField]: from },
-      });
-    }
-
-    return ConversationMessages.updateMany(selector, {
-      $pull: { [reactionField]: { id: from.id } },
-    });
-  }
-
-  /**
-   * Receives like and reaction
-   */
-  public async handleReactions(reactionParams: IReactionParams) {
-    const { verb, post_id, comment_id, reaction_type, item, from } = reactionParams;
-    let selector = {};
-
-    if (post_id) {
-      selector = { 'facebookData.postId': post_id };
-    }
-
-    if (comment_id) {
-      selector = { 'facebookData.commentId': comment_id };
-    }
-
-    // Receiving like
-    if (item === 'like') {
-      await this.updateLikeCount(verb, selector);
-    }
-
-    // Receiving reaction
-    if (item === 'reaction') {
-      await this.updateReactions(verb, selector, reaction_type || 'like', from);
-    }
-  }
-
-  /*
-   * Common get or create conversation helper using both in messenger and feed
-   */
-  public async getOrCreateConversation(params: IGetOrCreateConversationParams) {
-    // extract params
-    const { findSelector, status, senderId, facebookData, content, msgFacebookData, attachments } = params;
-
-    let conversation;
-
-    if (findSelector) {
-      conversation = await Conversations.findOne({
-        ...findSelector,
-      }).sort({ createdAt: -1 });
-    }
-
-    // We are closing our own posts automatically below. So to prevent
-    // from creation of new conversation for every comment we are checking
-    // both message count & conversation status to new conversation.
-    // And we are creating new conversations only if previous conversation has
-    // at least 2 messages and has closed status.
-    if (
-      !conversation ||
-      (conversation.messageCount &&
-        (conversation.messageCount > 1 && conversation.status === CONVERSATION_STATUSES.CLOSED))
-    ) {
-      const customer = await this.getOrCreateCustomer(senderId);
-
-      if (!this.currentPageId) {
-        throw new Error("getOrCreateConversation: Couldn't set current page id");
-      }
-
-      conversation = await Conversations.createConversation({
-        integrationId: this.integration._id,
-        customerId: customer._id,
-        status,
-        content,
-
-        // save facebook infos
-        facebookData: {
-          ...facebookData,
-          pageId: this.currentPageId,
-        },
-      });
-
-      // Creating conversation created activity log for customer
-      await ActivityLogs.createConversationLog(conversation, customer);
-    } else {
-      conversation = await Conversations.reopen(conversation._id);
-    }
-
-    // Restoring deleted facebook converation's data
-    const restored = await this.restoreParentPost({
-      conversation,
-      userId: senderId,
-      facebookData: msgFacebookData,
-    });
-
-    if (restored) {
-      return 'restored';
-    }
-
-    // create new message
-    return this.createMessage({
-      conversation,
-      userId: senderId,
-      content,
-      attachments,
-      facebookData: msgFacebookData,
-    });
   }
 
   /*
@@ -536,6 +307,77 @@ export class SaveWebhookResponse {
     });
   }
 
+  /*
+   * Common get or create conversation helper using both in messenger and feed
+   */
+  public async getOrCreateConversation(params: IGetOrCreateConversationParams) {
+    // extract params
+    const { findSelector, status, senderId, facebookData, content, msgFacebookData, attachments } = params;
+
+    let conversation;
+
+    if (findSelector) {
+      conversation = await Conversations.findOne({
+        ...findSelector,
+      }).sort({ createdAt: -1 });
+    }
+
+    // We are closing our own posts automatically below. So to prevent
+    // from creation of new conversation for every comment we are checking
+    // both message count & conversation status to new conversation.
+    // And we are creating new conversations only if previous conversation has
+    // at least 2 messages and has closed status.
+    if (
+      !conversation ||
+      (conversation.messageCount &&
+        (conversation.messageCount > 1 && conversation.status === CONVERSATION_STATUSES.CLOSED))
+    ) {
+      const customer = await this.getOrCreateCustomer(senderId);
+
+      if (!this.currentPageId) {
+        throw new Error("getOrCreateConversation: Couldn't set current page id");
+      }
+
+      conversation = await Conversations.createConversation({
+        integrationId: this.integration._id,
+        customerId: customer._id,
+        status,
+        content,
+
+        // save facebook infos
+        facebookData: {
+          ...facebookData,
+          pageId: this.currentPageId,
+        },
+      });
+
+      // Creating conversation created activity log for customer
+      await ActivityLogs.createConversationLog(conversation, customer);
+    } else {
+      conversation = await Conversations.reopen(conversation._id);
+    }
+
+    // Restoring deleted facebook converation's data
+    const restored = await this.restoreParentPost({
+      conversation,
+      userId: senderId,
+      facebookData: msgFacebookData,
+    });
+
+    if (restored) {
+      return 'restored';
+    }
+
+    // create new message
+    return this.createMessage({
+      conversation,
+      userId: senderId,
+      content,
+      attachments,
+      facebookData: msgFacebookData,
+    });
+  }
+
   /**
    * Get or create customer using facebook data
    */
@@ -654,11 +496,20 @@ export class SaveWebhookResponse {
     // getting page access token
     const accessTokenResponse: any = await this.getPageAccessToken();
     const accessToken = accessTokenResponse.access_token;
-    const commentResponse = await getCommentInfo({ commentId, token: accessToken });
+    const commentResponse = await getCommentInfo({
+      commentId,
+      token: accessToken,
+    });
 
     if (commentResponse.parent) {
-      const parentCommentResponse = await getCommentInfo({ commentId: commentResponse.parent.id, token: accessToken });
-      const parentCommentComments = await getComments({ commentId: parentCommentResponse.id, token: accessToken });
+      const parentCommentResponse = await getCommentInfo({
+        commentId: commentResponse.parent.id,
+        token: accessToken,
+      });
+      const parentCommentComments = await getComments({
+        commentId: parentCommentResponse.id,
+        token: accessToken,
+      });
       const parentCommentParams = await this.handleComments({
         ...parentCommentResponse,
         item: 'comment',
@@ -712,7 +563,7 @@ export class SaveWebhookResponse {
       post_id: postResponse.id,
     });
 
-    console.log('post', postResponse);
+    const { comments } = postResponse;
 
     await this.createMessage({
       conversation,
@@ -721,6 +572,7 @@ export class SaveWebhookResponse {
       facebookData: {
         senderId: postResponse.from.id,
         senderName: postResponse.from.name,
+        commentCount: comments ? comments.summary.total_count : 0,
         ...postParams,
       },
     });
@@ -819,6 +671,161 @@ export class SaveWebhookResponse {
 
     return true;
   }
+
+  /*
+   * Get page access token
+   */
+  public getPageAccessToken() {
+    // get page access token
+    return graphRequest.get(`${this.currentPageId}/?fields=access_token`, this.userAccessToken);
+  }
+
+  /**
+   * Receives feed updates
+   */
+  public handlePosts(postParams: IPostParams) {
+    const { post_id, video_id, link, photo_id, item, photos, created_time } = postParams;
+
+    const doc: IMsgFacebook = {
+      postId: post_id,
+      item,
+      isPost: true,
+    };
+
+    if (link) {
+      // Posted video
+      if (video_id) {
+        doc.video = link;
+
+        // Posted photo
+      } else if (photo_id) {
+        doc.photo = link;
+      } else {
+        doc.link = link;
+      }
+    }
+
+    if (created_time) {
+      doc.createdTime = created_time;
+    }
+
+    // Posted multiple image
+    if (photos) {
+      doc.photos = photos;
+    }
+
+    return doc;
+  }
+
+  /**
+   * Receives comment
+   */
+  public async handleComments(commentParams: ICommentParams) {
+    const { photo, video, post_id, parent_id, item, comment_id, verb, id, created_time } = commentParams;
+
+    const doc: IMsgFacebook = {
+      postId: post_id,
+      item,
+      commentId: id ? id : comment_id,
+    };
+
+    if (post_id !== parent_id) {
+      doc.parentId = parent_id;
+    }
+
+    if (photo) {
+      doc.photo = photo;
+    }
+
+    if (video) {
+      doc.video = video;
+    }
+
+    if (created_time) {
+      doc.createdTime = created_time;
+    }
+
+    if (verb && post_id) {
+      // Counting post comments only
+      await this.updateCommentCount(verb, post_id);
+    }
+
+    return doc;
+  }
+
+  /**
+   * Increase or decrease comment count
+   */
+  public async updateCommentCount(type: string, postId: string) {
+    let count = -1;
+
+    if (type === 'add') {
+      count = 1;
+    }
+
+    return ConversationMessages.updateOne(
+      { 'facebookData.postId': postId },
+      { $inc: { 'facebookData.commentCount': count } },
+    );
+  }
+
+  /**
+   * Increase or decrease like count
+   */
+  public async updateLikeCount(type: string, selector: any) {
+    let count = -1;
+
+    if (type === 'add') {
+      count = 1;
+    }
+
+    return ConversationMessages.updateMany(selector, {
+      $inc: { 'facebookData.likeCount': count },
+    });
+  }
+
+  /**
+   * Updates reaction
+   */
+  public async updateReactions(type: string, selector: any, reactionType: string, from: IFbUser) {
+    const reactionField = `facebookData.reactions.${reactionType}`;
+
+    if (type === 'add') {
+      return ConversationMessages.updateMany(selector, {
+        $push: { [reactionField]: from },
+      });
+    }
+
+    return ConversationMessages.updateMany(selector, {
+      $pull: { [reactionField]: { id: from.id } },
+    });
+  }
+
+  /**
+   * Receives like and reaction
+   */
+  public async handleReactions(reactionParams: IReactionParams) {
+    const { verb, post_id, comment_id, reaction_type, item, from } = reactionParams;
+    let selector = {};
+
+    if (post_id) {
+      selector = { 'facebookData.postId': post_id };
+    }
+
+    if (comment_id) {
+      selector = { 'facebookData.commentId': comment_id };
+    }
+
+    // Receiving like
+    if (item === 'like') {
+      await this.updateLikeCount(verb, selector);
+    }
+
+    // Receiving reaction
+    if (item === 'reaction') {
+      await this.updateReactions(verb, selector, reaction_type || 'like', from);
+    }
+  }
 }
 
 /*
@@ -873,7 +880,9 @@ export const facebookReply = async (
     throw new Error("facebookReply: Conversation doesn't have facebookData");
   }
 
-  const account = await Accounts.findOne({ _id: integration.facebookData.accountId });
+  const account = await Accounts.findOne({
+    _id: integration.facebookData.accountId,
+  });
 
   if (!account) {
     throw new Error('facebookReply: Account not found');
@@ -961,6 +970,18 @@ export const facebookReply = async (
       { $inc: { 'facebookData.commentCount': 1 } },
     );
   }
+};
+
+/*
+ * Get list of pages that authorized user owns
+ */
+export const getPageList = async (accessToken?: string) => {
+  const response: any = await graphRequest.get('/me/accounts?limit=100', accessToken);
+
+  return response.data.map(page => ({
+    id: page.id,
+    name: page.name,
+  }));
 };
 
 export const getConfig = () => {

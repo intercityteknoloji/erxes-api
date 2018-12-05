@@ -273,6 +273,15 @@ const conversationQueries = {
       ],
     }).countDocuments();
   },
+
+  /**
+   * Fetch more comments of post
+   */
+  async conversationsFetchFacebookComments(_root, args) {
+    const { limit, conversationId } = args;
+
+    return { limit, conversationId };
+  },
 };
 
 moduleRequireLogin(conversationQueries);

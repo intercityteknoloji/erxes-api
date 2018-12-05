@@ -165,6 +165,7 @@ export const queries = `
   conversationDetail(_id: String!): Conversation
   conversationsGetLast(${filterParams}): Conversation
   conversationsTotalUnreadCount: Int
+  conversationsFetchFacebookComments(conversationId: String!, limit: Int): [ConversationMessage]
 `;
 
 export const mutations = `
