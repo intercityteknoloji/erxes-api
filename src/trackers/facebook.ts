@@ -13,7 +13,7 @@ import { IFacebook as IMsgFacebook, IFbUser, IMessageDocument } from '../db/mode
 import { IConversationDocument, IFacebook } from '../db/models/definitions/conversations';
 import { ICustomerDocument } from '../db/models/definitions/customers';
 import { IIntegrationDocument } from '../db/models/definitions/integrations';
-import { findPostComments, getCommentInfo, getComments, getPostInfo, graphRequest, IComments } from './facebookTracker';
+import { getCommentInfo, getComments, getPostInfo, graphRequest, IComments } from './facebookTracker';
 
 interface IPostParams {
   post_id?: string;
@@ -358,15 +358,11 @@ export class SaveWebhookResponse {
     }
 
     // Restoring deleted facebook converation's data
-    const restored = await this.restoreParentPost({
+    await this.restoreParentPost({
       conversation,
       userId: senderId,
       facebookData: msgFacebookData,
     });
-
-    if (restored) {
-      return 'restored';
-    }
 
     // create new message
     return this.createMessage({
@@ -496,62 +492,6 @@ export class SaveWebhookResponse {
     // getting page access token
     const accessTokenResponse: any = await this.getPageAccessToken();
     const accessToken = accessTokenResponse.access_token;
-    const commentResponse = await getCommentInfo({
-      commentId,
-      token: accessToken,
-    });
-
-    if (commentResponse.parent) {
-      const parentCommentResponse = await getCommentInfo({
-        commentId: commentResponse.parent.id,
-        token: accessToken,
-      });
-      const parentCommentComments = await getComments({
-        commentId: parentCommentResponse.id,
-        token: accessToken,
-      });
-      const parentCommentParams = await this.handleComments({
-        ...parentCommentResponse,
-        item: 'comment',
-      });
-
-      await this.createMessage({
-        conversation,
-        userId,
-        content: parentCommentResponse.message || '...',
-        facebookData: {
-          senderId: parentCommentResponse.from.id,
-          senderName: parentCommentResponse.from.name,
-          ...parentCommentParams,
-        },
-      });
-
-      for (const comment of parentCommentComments.data) {
-        const params = await this.handleComments({
-          ...comment,
-          item: 'comment',
-          parent_id: parentCommentResponse.id,
-        });
-
-        await this.createMessage({
-          conversation,
-          userId,
-          content: comment.message || comment.attachment,
-          facebookData: {
-            senderId: comment.from.id,
-            senderName: comment.from.name,
-            ...params,
-          },
-        });
-      }
-    }
-
-    const commentParams = await this.handleComments({
-      ...commentResponse,
-      item: 'comment',
-      parent_id: commentResponse.parent && commentResponse.parent.id,
-      commentId,
-    });
 
     // creating parent post if comment has no parent
     // get post info
@@ -577,99 +517,59 @@ export class SaveWebhookResponse {
       },
     });
 
-    await this.createMessage({
-      conversation,
-      userId,
-      content: commentResponse.message || commentResponse.attachment,
-      facebookData: {
-        senderId: commentResponse.from.id,
-        senderName: commentResponse.from.name,
-        ...commentParams,
-      },
+    const commentResponse = await getCommentInfo({
+      commentId,
+      token: accessToken,
     });
+
+    if (commentResponse.parent) {
+      const parentCommentResponse = await getCommentInfo({
+        commentId: commentResponse.parent.id,
+        token: accessToken,
+      });
+      const parentCommentComments = await getComments({
+        commentId: parentCommentResponse.id,
+        token: accessToken,
+      });
+
+      await this.createMessageFromComments(conversation, userId, [
+        ...parentCommentComments.data,
+        parentCommentResponse,
+      ]);
+    }
 
     return true;
   }
 
-  /**
-   * Restore deleted facebook converation's data
-   */
-  public async restoreOldPosts({
-    conversation,
-    userId,
-    facebookData,
-  }: {
-    conversation: IConversationDocument;
-    userId: string;
-    facebookData: IMsgFacebook;
-  }): Promise<boolean> {
-    const { item, postId } = facebookData;
+  public async createMessageFromComments(conversation, userId, comments) {
+    for (const comment of comments) {
+      if (!comment.id) {
+        return;
+      }
 
-    if (!postId) {
-      return false;
-    }
-
-    if (item !== 'comment') {
-      return false;
-    }
-
-    const parentPost = await ConversationMessages.findOne({
-      conversationId: conversation._id,
-      'facebookData.isPost': true,
-      'facebookData.postId': postId,
-    });
-
-    if (parentPost) {
-      return false;
-    }
-
-    // getting page access token
-    const accessTokenResponse: any = await this.getPageAccessToken();
-    const accessToken = accessTokenResponse.access_token;
-
-    // creating parent post if comment has no parent
-    // get post info
-    const fields = `/${postId}?fields=caption,description,link,picture,source,message,from`;
-    const postResponse: any = await graphRequest.get(fields, accessToken);
-
-    const postParams = await this.handlePosts({
-      ...postResponse,
-      item: 'status',
-      post_id: postResponse.id,
-    });
-
-    await this.createMessage({
-      conversation,
-      userId,
-      content: postResponse.message,
-      facebookData: {
-        senderId: postResponse.from.id,
-        senderName: postResponse.from.name,
-        ...postParams,
-      },
-    });
-
-    // getting all the comments of post
-    const postComments = await findPostComments(accessToken, postId, []);
-
-    // creating conversation message for each comment
-    for (const comment of postComments) {
-      await this.createMessage({
-        conversation,
-        userId,
-        content: comment.message || '...',
-        facebookData: {
-          postId: postResponse.id,
-          commentId: comment.id,
-          item: 'comment',
-          senderId: comment.from.id,
-          senderName: comment.from.name,
-          parentId: comment.parent && comment.parent.id,
-        },
+      const prevMessage = await ConversationMessages.findOne({
+        'facebookData.commentId': comment.id,
+        conversationId: conversation._id,
       });
-    }
 
-    return true;
+      if (!prevMessage) {
+        const params = await this.handleComments({
+          ...comment,
+          item: 'comment',
+        });
+
+        await this.createMessage({
+          conversation,
+          userId,
+          content: comment.message || comment.attachment,
+          facebookData: {
+            senderId: comment.from.id,
+            senderName: comment.from.name,
+            ...params,
+          },
+        });
+      }
+    }
   }
 
   /*
@@ -721,13 +621,17 @@ export class SaveWebhookResponse {
    * Receives comment
    */
   public async handleComments(commentParams: ICommentParams) {
-    const { photo, video, post_id, parent_id, item, comment_id, verb, id, created_time } = commentParams;
+    const { photo, video, post_id, parent_id, item, comment_id, verb, id, created_time, parent } = commentParams;
 
     const doc: IMsgFacebook = {
       postId: post_id,
       item,
       commentId: id ? id : comment_id,
     };
+
+    if (parent) {
+      doc.parentId = parent.id;
+    }
 
     if (post_id !== parent_id) {
       doc.parentId = parent_id;

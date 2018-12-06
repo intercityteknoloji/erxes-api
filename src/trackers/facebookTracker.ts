@@ -198,20 +198,23 @@ export const subscribePage = async (pageId, pageToken): Promise<{ success: true 
 
 export const getCommentInfo = async ({ commentId, token }: { commentId: string; token: string }): Promise<IComment> => {
   return graphRequest.get(
-    `/${commentId}?fields=parent.fields(id),from,message,can_comment,attachment,comment_count,created_time,comments.summary(true)`,
+    `/${commentId}?fields=parent.fields(id),id,from,message,can_comment,attachment,comment_count,created_time,comments.summary(true)`,
     token,
   );
 };
 
 export const getPostInfo = async ({ postId, token }: { postId: string; token: string }): Promise<IPost> => {
   return graphRequest.get(
-    `/${postId}?fields=id,caption,description,link,picture,source,message,from,comments.summary(true)`,
+    `/${postId}?fields=id,caption,description,link,picture,source,message,from,comments.summary(true),created_time`,
     token,
   );
 };
 
 export const getComments = async ({ commentId, token }: { commentId: string; token: string }): Promise<IComments> => {
-  return graphRequest.get(`/${commentId}/comments?fields=parent.fields(id),from,message&limit=1000`, token);
+  return graphRequest.get(
+    `/${commentId}/comments?fields=parent.fields(id),id,created_time,from,message&limit=1000`,
+    token,
+  );
 };
 
 export const fetchComments = async ({ postId, token, limit }: { postId: string; token: string; limit: number }) => {
