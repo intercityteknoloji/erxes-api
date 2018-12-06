@@ -13,7 +13,7 @@ import { IFacebook as IMsgFacebook, IFbUser, IMessageDocument } from '../db/mode
 import { IConversationDocument, IFacebook } from '../db/models/definitions/conversations';
 import { ICustomerDocument } from '../db/models/definitions/customers';
 import { IIntegrationDocument } from '../db/models/definitions/integrations';
-import { getCommentInfo, getComments, getPostInfo, graphRequest, IComments } from './facebookTracker';
+import { fetchComments, getCommentInfo, getComments, getPostInfo, graphRequest, IComments } from './facebookTracker';
 
 interface IPostParams {
   post_id?: string;
@@ -183,12 +183,12 @@ export class SaveWebhookResponse {
         return null;
       }
 
-      msgFacebookData = await this.handleComments(value);
+      msgFacebookData = generateCommentParams(value);
     }
 
     // sending to post handler if post
     if (FACEBOOK_POST_TYPES.includes(item)) {
-      msgFacebookData = this.handlePosts(value);
+      msgFacebookData = generatePostParams(value);
     }
 
     // sending to reaction handler
@@ -332,7 +332,11 @@ export class SaveWebhookResponse {
       (conversation.messageCount &&
         (conversation.messageCount > 1 && conversation.status === CONVERSATION_STATUSES.CLOSED))
     ) {
-      const customer = await this.getOrCreateCustomer(senderId);
+      const customer = await getOrCreateCustomer({
+        fbUserId: senderId,
+        integrationId: this.integration._id,
+        token: await this.getPageAccessToken(),
+      });
 
       if (!this.currentPageId) {
         throw new Error("getOrCreateConversation: Couldn't set current page id");
@@ -374,56 +378,6 @@ export class SaveWebhookResponse {
     });
   }
 
-  /**
-   * Get or create customer using facebook data
-   */
-  public async getOrCreateCustomer(fbUserId: string): Promise<ICustomerDocument> {
-    const integrationId = this.integration._id;
-
-    const customer = await Customers.findOne({ 'facebookData.id': fbUserId });
-
-    if (customer) {
-      return customer;
-    }
-
-    // get page access token
-    let res: any = await this.getPageAccessToken();
-
-    // get user info
-    res = await graphRequest.get(`/${fbUserId}`, res.access_token);
-
-    // get profile pic
-    const getProfilePic = async (fbId: string) => {
-      try {
-        const response: any = await graphRequest.get(`/${fbId}/picture?height=600`);
-        return response.image ? response.location : '';
-      } catch (e) {
-        return null;
-      }
-    };
-
-    // when feed response will contain name field
-    // when messeger response will not contain name field
-    const firstName = res.first_name || res.name;
-    const lastName = res.last_name || '';
-
-    // create customer
-    const createdCustomer = await Customers.createCustomer({
-      firstName,
-      lastName,
-      integrationId,
-      avatar: (await getProfilePic(fbUserId)) || '',
-      facebookData: {
-        id: fbUserId,
-      },
-    });
-
-    // create log
-    await ActivityLogs.createCustomerRegistrationLog(createdCustomer);
-
-    return createdCustomer;
-  }
-
   /*
    * Create new message
    */
@@ -444,7 +398,11 @@ export class SaveWebhookResponse {
       throw new Error('createMessage: Conversation not found');
     }
 
-    const customer = await this.getOrCreateCustomer(userId);
+    const customer = await getOrCreateCustomer({
+      fbUserId: userId,
+      integrationId: this.integration._id,
+      token: await this.getPageAccessToken(),
+    });
 
     // create new message
     const message = await ConversationMessages.createMessage({
@@ -497,7 +455,7 @@ export class SaveWebhookResponse {
     // get post info
     const postResponse = await getPostInfo({ postId, token: accessToken });
 
-    const postParams = await this.handlePosts({
+    const postParams = await generatePostParams({
       ...postResponse,
       item: 'status',
       post_id: postResponse.id,
@@ -553,7 +511,7 @@ export class SaveWebhookResponse {
       });
 
       if (!prevMessage) {
-        const params = await this.handleComments({
+        const params = generateCommentParams({
           ...comment,
           item: 'comment',
         });
@@ -578,99 +536,6 @@ export class SaveWebhookResponse {
   public getPageAccessToken() {
     // get page access token
     return graphRequest.get(`${this.currentPageId}/?fields=access_token`, this.userAccessToken);
-  }
-
-  /**
-   * Receives feed updates
-   */
-  public handlePosts(postParams: IPostParams) {
-    const { post_id, video_id, link, photo_id, item, photos, created_time } = postParams;
-
-    const doc: IMsgFacebook = {
-      postId: post_id,
-      item,
-      isPost: true,
-    };
-
-    if (link) {
-      // Posted video
-      if (video_id) {
-        doc.video = link;
-
-        // Posted photo
-      } else if (photo_id) {
-        doc.photo = link;
-      } else {
-        doc.link = link;
-      }
-    }
-
-    if (created_time) {
-      doc.createdTime = created_time;
-    }
-
-    // Posted multiple image
-    if (photos) {
-      doc.photos = photos;
-    }
-
-    return doc;
-  }
-
-  /**
-   * Receives comment
-   */
-  public async handleComments(commentParams: ICommentParams) {
-    const { photo, video, post_id, parent_id, item, comment_id, verb, id, created_time, parent } = commentParams;
-
-    const doc: IMsgFacebook = {
-      postId: post_id,
-      item,
-      commentId: id ? id : comment_id,
-    };
-
-    if (parent) {
-      doc.parentId = parent.id;
-    }
-
-    if (post_id !== parent_id) {
-      doc.parentId = parent_id;
-    }
-
-    if (photo) {
-      doc.photo = photo;
-    }
-
-    if (video) {
-      doc.video = video;
-    }
-
-    if (created_time) {
-      doc.createdTime = created_time;
-    }
-
-    if (verb && post_id) {
-      // Counting post comments only
-      await this.updateCommentCount(verb, post_id);
-    }
-
-    return doc;
-  }
-
-  /**
-   * Increase or decrease comment count
-   */
-  public async updateCommentCount(type: string, postId: string) {
-    let count = -1;
-
-    if (type === 'add') {
-      count = 1;
-    }
-
-    return ConversationMessages.updateOne(
-      { 'facebookData.postId': postId },
-      { $inc: { 'facebookData.commentCount': count } },
-    );
   }
 
   /**
@@ -732,33 +597,155 @@ export class SaveWebhookResponse {
   }
 }
 
-/*
- * Receive per app webhook response
+/**
+ * Generate facebook data for conversation messages
  */
-export const receiveWebhookResponse = async data => {
-  const integrations = await Integrations.find({
-    kind: INTEGRATION_KIND_CHOICES.FACEBOOK,
-    'facebookData.accountId': { $exists: true },
+const generatePostParams = (postParams: IPostParams) => {
+  const { post_id, video_id, link, photo_id, item, photos, created_time } = postParams;
+
+  const doc: IMsgFacebook = {
+    postId: post_id,
+    item,
+    isPost: true,
+  };
+
+  if (link) {
+    // Posted video
+    if (video_id) {
+      doc.video = link;
+
+      // Posted photo
+    } else if (photo_id) {
+      doc.photo = link;
+    } else {
+      doc.link = link;
+    }
+  }
+
+  if (created_time) {
+    doc.createdTime = created_time;
+  }
+
+  // Posted multiple image
+  if (photos) {
+    doc.photos = photos;
+  }
+
+  return doc;
+};
+
+/**
+ * Generate facebook data for conversation messages
+ */
+const generateCommentParams = (commentParams: ICommentParams) => {
+  const { photo, video, post_id, parent_id, item, comment_id, id, created_time, parent } = commentParams;
+
+  const doc: IMsgFacebook = {
+    postId: post_id,
+    item,
+    commentId: id ? id : comment_id,
+  };
+
+  if (parent) {
+    doc.parentId = parent.id;
+  }
+
+  if (post_id !== parent_id) {
+    doc.parentId = parent_id;
+  }
+
+  if (photo) {
+    doc.photo = photo;
+  }
+
+  if (video) {
+    doc.video = video;
+  }
+
+  if (created_time) {
+    doc.createdTime = created_time;
+  }
+
+  return doc;
+};
+
+/**
+ * Get or create customer using facebook data
+ */
+const getOrCreateCustomer = async ({ fbUserId, integrationId, token }): Promise<ICustomerDocument> => {
+  const customer = await Customers.findOne({ 'facebookData.id': fbUserId });
+
+  if (customer) {
+    return customer;
+  }
+
+  // get user info
+  const res = await graphRequest.get(`/${fbUserId}`, token);
+
+  // get profile pic
+  const getProfilePic = async (fbId: string) => {
+    try {
+      const response: any = await graphRequest.get(`/${fbId}/picture?height=600`);
+      return response.image ? response.location : '';
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // when feed response will contain name field
+  // when messeger response will not contain name field
+  const firstName = res.first_name || res.name;
+  const lastName = res.last_name || '';
+
+  // create customer
+  const createdCustomer = await Customers.createCustomer({
+    firstName,
+    lastName,
+    integrationId,
+    avatar: (await getProfilePic(fbUserId)) || '',
+    facebookData: {
+      id: fbUserId,
+    },
   });
 
-  for (const integration of integrations) {
-    const { facebookData } = integration;
+  // create log
+  await ActivityLogs.createCustomerRegistrationLog(createdCustomer);
 
-    if (!facebookData) {
-      throw new Error('Could not find integrations facebookData');
-    }
+  return createdCustomer;
+};
 
-    const account = await Accounts.findOne({ _id: facebookData.accountId });
+export const getPostComments = async ({ postId, token, limit, conversation }) => {
+  const comments = await fetchComments({ postId, token, limit });
 
-    if (!account) {
-      throw new Error('Could not find account');
-    }
+  for (const comment of comments) {
+    const customer = await getOrCreateCustomer({
+      fbUserId: comment.from.id,
+      integrationId: conversation.integrationId,
+      token,
+    });
 
-    // when new message or other kind of activity in page
-    const saveWebhookResponse = new SaveWebhookResponse(account.token, integration, data);
-
-    await saveWebhookResponse.start();
+    await ConversationMessages.createMessage({
+      conversationId: conversation._id,
+      customerId: customer._id,
+      content: comment.message || '...',
+      facebookData: generateCommentParams(comment),
+      internal: false,
+    });
   }
+
+  return { postId, token, limit, conversation };
+};
+
+/*
+ * Get list of pages that authorized user owns
+ */
+export const getPageList = async (accessToken?: string) => {
+  const response: any = await graphRequest.get('/me/accounts?limit=100', accessToken);
+
+  return response.data.map(page => ({
+    id: page.id,
+    name: page.name,
+  }));
 };
 
 /**
@@ -876,18 +863,6 @@ export const facebookReply = async (
   }
 };
 
-/*
- * Get list of pages that authorized user owns
- */
-export const getPageList = async (accessToken?: string) => {
-  const response: any = await graphRequest.get('/me/accounts?limit=100', accessToken);
-
-  return response.data.map(page => ({
-    id: page.id,
-    name: page.name,
-  }));
-};
-
 export const getConfig = () => {
   const { FACEBOOK } = process.env;
 
@@ -896,4 +871,33 @@ export const getConfig = () => {
   }
 
   return JSON.parse(FACEBOOK);
+};
+
+/*
+ * Receive per app webhook response
+ */
+export const receiveWebhookResponse = async data => {
+  const integrations = await Integrations.find({
+    kind: INTEGRATION_KIND_CHOICES.FACEBOOK,
+    'facebookData.accountId': { $exists: true },
+  });
+
+  for (const integration of integrations) {
+    const { facebookData } = integration;
+
+    if (!facebookData) {
+      throw new Error('Could not find integrations facebookData');
+    }
+
+    const account = await Accounts.findOne({ _id: facebookData.accountId });
+
+    if (!account) {
+      throw new Error('Could not find account');
+    }
+
+    // when new message or other kind of activity in page
+    const saveWebhookResponse = new SaveWebhookResponse(account.token, integration, data);
+
+    await saveWebhookResponse.start();
+  }
 };
