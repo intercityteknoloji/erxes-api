@@ -210,7 +210,7 @@ export class SaveWebhookResponse {
     // save returned value. This value will always be the same
     let postId = value.post_id;
 
-    let response: any = await this.getPageAccessToken();
+    let response: any = await getPageAccessToken({ pageId: this.currentPageId, userAccessToken: this.userAccessToken });
 
     // acess token expired
     if (response === 'Error processing https request') {
@@ -335,7 +335,7 @@ export class SaveWebhookResponse {
       const customer = await getOrCreateCustomer({
         fbUserId: senderId,
         integrationId: this.integration._id,
-        token: await this.getPageAccessToken(),
+        token: await getPageAccessToken({ pageId: this.currentPageId, userAccessToken: this.userAccessToken }),
       });
 
       if (!this.currentPageId) {
@@ -401,7 +401,7 @@ export class SaveWebhookResponse {
     const customer = await getOrCreateCustomer({
       fbUserId: userId,
       integrationId: this.integration._id,
-      token: await this.getPageAccessToken(),
+      token: await getPageAccessToken({ pageId: this.currentPageId, userAccessToken: this.userAccessToken }),
     });
 
     // create new message
@@ -448,7 +448,10 @@ export class SaveWebhookResponse {
     }
 
     // getting page access token
-    const accessTokenResponse: any = await this.getPageAccessToken();
+    const accessTokenResponse: any = await getPageAccessToken({
+      pageId: this.currentPageId,
+      userAccessToken: this.userAccessToken,
+    });
     const accessToken = accessTokenResponse.access_token;
 
     // creating parent post if comment has no parent
@@ -528,14 +531,6 @@ export class SaveWebhookResponse {
         });
       }
     }
-  }
-
-  /*
-   * Get page access token
-   */
-  public getPageAccessToken() {
-    // get page access token
-    return graphRequest.get(`${this.currentPageId}/?fields=access_token`, this.userAccessToken);
   }
 
   /**
@@ -642,7 +637,7 @@ const generateCommentParams = (commentParams: ICommentParams) => {
 
   const doc: IMsgFacebook = {
     postId: post_id,
-    item,
+    item: item ? item : 'comment',
     commentId: id ? id : comment_id,
   };
 
@@ -714,26 +709,74 @@ const getOrCreateCustomer = async ({ fbUserId, integrationId, token }): Promise<
   return createdCustomer;
 };
 
-export const getPostComments = async ({ postId, token, limit, conversation }) => {
-  const comments = await fetchComments({ postId, token, limit });
+export const getPostComments = async ({ limit, conversationId }) => {
+  const conversation = await Conversations.findOne({
+    _id: conversationId,
+  });
 
-  for (const comment of comments) {
+  if (!conversation || !conversation.facebookData) {
+    return;
+  }
+
+  const integration = await Integrations.findOne({
+    _id: conversation.integrationId,
+  });
+
+  if (!integration || !integration.facebookData) {
+    return;
+  }
+
+  const account = await Accounts.findOne({
+    _id: integration.facebookData.accountId,
+  });
+
+  if (!account) {
+    return;
+  }
+
+  const pageTokenResponse = await getPageAccessToken({
+    userAccessToken: account.token,
+    pageId: conversation.facebookData.pageId,
+  });
+
+  const comments = await fetchComments({
+    postId: conversation.facebookData.postId || '',
+    token: pageTokenResponse.access_token,
+    limit,
+  });
+
+  console.log(comments);
+
+  for (const comment of comments.data) {
     const customer = await getOrCreateCustomer({
       fbUserId: comment.from.id,
-      integrationId: conversation.integrationId,
-      token,
+      integrationId: integration._id,
+      token: pageTokenResponse.access_token,
     });
+
+    const prevMessage = await ConversationMessages.findOne({
+      'facebookData.commentId': comment.id,
+      conversationId,
+    });
+
+    if (prevMessage) {
+      return;
+    }
 
     await ConversationMessages.createMessage({
       conversationId: conversation._id,
       customerId: customer._id,
       content: comment.message || '...',
-      facebookData: generateCommentParams(comment),
+      facebookData: {
+        senderId: comment.from.id,
+        senderName: comment.from.name,
+        ...generateCommentParams(comment),
+      },
       internal: false,
     });
   }
 
-  return { postId, token, limit, conversation };
+  return true;
 };
 
 /*
@@ -746,6 +789,14 @@ export const getPageList = async (accessToken?: string) => {
     id: page.id,
     name: page.name,
   }));
+};
+
+/*
+ * Get page access token
+ */
+export const getPageAccessToken = async ({ pageId, userAccessToken }): Promise<{ access_token: string }> => {
+  // get page access token
+  return graphRequest.get(`${pageId}/?fields=access_token`, userAccessToken);
 };
 
 /**

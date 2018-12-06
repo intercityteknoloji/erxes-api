@@ -1,6 +1,7 @@
 import { Brands, Channels, ConversationMessages, Conversations, Tags } from '../../../db/models';
 import { IUserDocument } from '../../../db/models/definitions/users';
 
+import { getPostComments } from '../../../trackers/facebook';
 import { CONVERSATION_STATUSES, INTEGRATION_KIND_CHOICES } from '../../constants';
 import { moduleRequireLogin } from '../../permissions';
 import QueryBuilder, { IListArgs } from './conversationQueryBuilder';
@@ -119,6 +120,7 @@ const conversationQueries = {
     },
   ) {
     const query = { conversationId };
+    let sort: { [key: string]: number } = { createdAt: 1 };
 
     if (limit) {
       const messages = await ConversationMessages.find(query)
@@ -129,7 +131,13 @@ const conversationQueries = {
       return messages.reverse();
     }
 
-    return ConversationMessages.find(query).sort({ createdAt: 1 });
+    const conversation = await Conversations.findOne({ _id: conversationId });
+
+    if (conversation && conversation.facebookData) {
+      sort = { 'facebookData.createdTime': 1 };
+    }
+
+    return ConversationMessages.find(query).sort(sort);
   },
 
   /**
@@ -280,7 +288,9 @@ const conversationQueries = {
   async conversationsFetchFacebookComments(_root, args) {
     const { limit, conversationId } = args;
 
-    return { limit, conversationId };
+    await getPostComments({ limit, conversationId });
+
+    return true;
   },
 };
 

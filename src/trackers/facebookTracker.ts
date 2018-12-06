@@ -218,5 +218,9 @@ export const getComments = async ({ commentId, token }: { commentId: string; tok
 };
 
 export const fetchComments = async ({ postId, token, limit }: { postId: string; token: string; limit: number }) => {
-  return graphRequest.get(`/${postId}/comments?order=reverse_chronological&limit=${limit || 5}`, token);
+  return graphRequest.get(
+    `/${postId}/comments?fields=from,id,created_time,message,attachment,order=reverse_chronological&limit=${limit ||
+      5}`,
+    token,
+  );
 };
